@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flashevolve"
+version = "0.0.1"
+description = "Asynchronous framework for agent self-evolution algorithms"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "openai>=1.0",
+]
+
+[project.optional-dependencies]
+# DSPy-backed SignatureSolver (used by examples/gepa via dspy.Signature).
+dspy = ["dspy>=2.6"]
+
+# Examples and smoke tests; includes IFBench's rule-checker stack.
+examples = [
+    "dspy>=2.6",
+    "nltk",
+    "spacy",
+    "emoji",
+    "syllapy",
+    "langdetect",
+    "setuptools",
+]
+
+# vLLM (only needed if you serve the model locally; remote endpoints work too).
+server = ["vllm"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["flashevolve"]
