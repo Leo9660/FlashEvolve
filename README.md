@@ -55,6 +55,14 @@ Run the toy GEPA demo (5 trivia samples, 3 evolve iterations):
 python -m examples.gepa.run
 ```
 
+Run the same demo against the OpenAI API:
+
+```bash
+export OPENAI_API_KEY=sk-...
+python -m examples.gepa.run --provider openai
+```
+
+
 A minimal pipeline reads like the paper figure:
 
 ```python
