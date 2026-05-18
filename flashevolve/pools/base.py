@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import ClassVar, Generic, TypeVar
 
 from ..artifacts.base import Artifact
-from ..stages.base import ScoredCandidate
+from ..stages.base import Admission
 
 A = TypeVar("A", bound=Artifact)
 
@@ -43,10 +43,10 @@ class Pool(ABC, Generic[A]):
         """
 
     @abstractmethod
-    async def admit(self, scored: ScoredCandidate) -> bool:
-        """Try to admit a scored candidate. Return True iff state changed
-        (and ``version`` was bumped). Admission policy is pool-specific:
-        overwrite always admits, Pareto admits if non-dominated,
-        append-only always admits, tournament admits with capacity
-        eviction.
+    async def admit(self, admitted: Admission) -> bool:
+        """Try to admit a candidate or scored candidate. Return True iff
+        state changed (and ``version`` was bumped). Admission policy is
+        pool-specific: overwrite always admits, Pareto admits if
+        non-dominated, append-only always admits, tournament admits with
+        capacity eviction.
         """

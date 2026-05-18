@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
@@ -70,6 +72,9 @@ class ScoredCandidate:
     candidate: Candidate
     score: float
     signals: dict[str, Any] = field(default_factory=dict)
+
+
+Admission = Candidate | ScoredCandidate
 
 
 # --- Stage base ----------------------------------------------------------
