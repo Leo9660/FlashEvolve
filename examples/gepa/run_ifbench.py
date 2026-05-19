@@ -32,7 +32,7 @@ from flashevolve.agents import Agent, AgentResult  # noqa: E402
 from flashevolve.artifacts import PromptArtifact  # noqa: E402
 from flashevolve.llm import ChatRequest, OpenAIChatClient  # noqa: E402
 from flashevolve.pools import AppendOnlyPool  # noqa: E402
-from flashevolve.runtime import SyncRuntime  # noqa: E402
+from flashevolve.runtime import GEPARuntime  # noqa: E402
 from flashevolve.samplers import FullSampler, RandomSampler  # noqa: E402
 
 from examples.gepa import (  # noqa: E402
@@ -49,7 +49,7 @@ VLLM_BASE_URL = "http://localhost:8000/v1"
 VLLM_MODEL = "Qwen/Qwen3-8B"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 OPENAI_MODEL = "gpt-4o-mini"
-DATA_DIR = "/workspace/flash-evolve/gepa-artifact/gepa_artifact/benchmarks/IFBench/data"
+DATA_DIR = "/workspace/FlashEvolve/gepa-artifact/gepa_artifact/benchmarks/IFBench/data"
 
 BUDGET = 3
 MINIBATCH = 3
@@ -202,7 +202,7 @@ async def main() -> None:
     )
 
     pool = AppendOnlyPool(seed=SEED)
-    runtime = SyncRuntime(
+    runtime = GEPARuntime(
         pool=pool,
         sampler=RandomSampler(train, k=MINIBATCH, seed=SEED),
         rollout=rollout,
@@ -216,9 +216,14 @@ async def main() -> None:
 
     print(
         f"Running GEPA for {args.budget} iters "
-        f"(1 bootstrap eval + {args.budget} evolve)"
+        f"(1 bootstrap eval + accept-on-improvement evolution)"
     )
     await runtime.run()
+
+    print(
+        f"Accepted={runtime.accepted_iterations} "
+        f"Rejected={runtime.rejected_iterations}"
+    )
 
     print(f"\n=== Final pool (version={pool.version}) ===")
     for i, sc in enumerate(pool._scores):

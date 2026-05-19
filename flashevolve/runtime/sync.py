@@ -1,6 +1,6 @@
 from ..pools.base import Pool
 from ..samplers.base import Sampler
-from ..stages.base import Sampled, Stage
+from ..stages.base import Candidate, Critique, Sampled, Trajectory, Stage
 from ..stages.evaluate import Evaluate
 from ..stages.propose import Propose
 from ..stages.rollout import Rollout
@@ -37,7 +37,7 @@ class SyncRuntime:
         rollout: Rollout,
         reflect: Stage,
         propose: Propose,
-        evaluate: Evaluate,
+        evaluate: Evaluate | None,
         initial_artifact,
         budget: int,
         selection_strategy: str = "pareto_front",
@@ -55,12 +55,6 @@ class SyncRuntime:
         self.selection_strategy = selection_strategy
 
     async def _seed_pool(self) -> None:
-        from ..stages.base import Candidate, Critique, Trajectory
-
-        # Evaluate the initial artifact and admit it through the standard
-        # ``Pool.admit`` path (the ABC method). We construct a minimal
-        # Candidate where parent and child are both the initial artifact,
-        # so the seed entry is structurally identical to later admissions.
         bootstrap_traj = Trajectory(
             version=0,
             artifact=self.initial_artifact,
@@ -75,6 +69,9 @@ class SyncRuntime:
             artifact=self.initial_artifact,
             critique=bootstrap_critique,
         )
+        if self.evaluate is None:
+            await self.pool.admit(bootstrap_candidate)
+            return
         scored = await self.evaluate.process(bootstrap_candidate)
         await self.pool.admit(scored)
 
@@ -92,7 +89,10 @@ class SyncRuntime:
             trajectory = await self.rollout.process(sampled)
             critique = await self.reflect.process(trajectory)
             candidate = await self.propose.process(critique)
-            scored = await self.evaluate.process(candidate)
-            await self.pool.admit(scored)
+            if self.evaluate is None:
+                await self.pool.admit(candidate)
+            else:
+                scored = await self.evaluate.process(candidate)
+                await self.pool.admit(scored)
 
         return self.pool

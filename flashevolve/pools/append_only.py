@@ -2,7 +2,7 @@ import random
 from typing import ClassVar
 
 from ..artifacts.base import Artifact
-from ..stages.base import ScoredCandidate
+from ..stages.base import Admission, ScoredCandidate
 from .base import Pool
 
 
@@ -71,7 +71,13 @@ class AppendOnlyPool(Pool[Artifact]):
     def version(self) -> int:
         return self._version
 
-    async def admit(self, scored: ScoredCandidate) -> bool:
+    async def admit(self, admitted: Admission) -> bool:
+        if not isinstance(admitted, ScoredCandidate):
+            raise TypeError(
+                "AppendOnlyPool.admit expects ScoredCandidate; "
+                f"got {type(admitted).__name__}"
+            )
+        scored = admitted
         self._artifacts.append(scored.candidate.artifact)
         self._scores.append(scored.score)
         per_sample = scored.signals.get("per_sample_scores", [])
