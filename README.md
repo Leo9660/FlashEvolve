@@ -1,9 +1,14 @@
-# FlashEvolve
+<img src="https://github.com/user-attachments/assets/3f90a44e-68ef-4fcd-b743-d21b01bf19b2"
+     align="left"
+     width="180" />
 
-A modular framework for **agent self-evolution algorithms**.
-Express GEPA, ACE, Meta-Harness, OpenEvolve, AlphaEvolve, Combee, and
-their kin as coordinates in one design space — and run them end-to-end
-against the same task so the comparison is direct, not narrative.
+FlashEvolve is a modular framework for supporting **agent self-evolution algorithms**.
+It expresses GEPA, ACE, Meta-Harness, OpenEvolve, AlphaEvolve, Combee, and
+related methods using a common set of artifacts, pools, and stage compositions.
+Following the approach in our paper, FlashEvolve also provides asynchronous
+execution to reduce wall-clock evolution time and improve proposal throughput.
+
+<br clear="left"/>
 
 ## Design
 
