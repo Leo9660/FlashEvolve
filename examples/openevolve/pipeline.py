@@ -272,9 +272,22 @@ class OpenEvolveDatasetEvaluate(Stage[Candidate, ScoredCandidate]):
     async def process(self, item: Candidate) -> ScoredCandidate:
         stage1 = await self._evaluate_batch(item.artifact, self._sample_batch(self.stage1_samples))
         final = stage1
+        print(
+            f"[OpenEvolve eval] stage1 score={stage1['score']:.3f} "
+            f"(n={len(stage1['per_sample_scores'])})"
+        )
         if stage1["score"] >= self.cascade_threshold:
             final = await self._evaluate_batch(
                 item.artifact, self._sample_batch(self.stage2_samples)
+            )
+            print(
+                f"[OpenEvolve eval] stage2 score={final['score']:.3f} "
+                f"(n={len(final['per_sample_scores'])})"
+            )
+        else:
+            print(
+                f"[OpenEvolve eval] stage2 skipped "
+                f"(threshold={self.cascade_threshold:.3f})"
             )
 
         score = final["score"]

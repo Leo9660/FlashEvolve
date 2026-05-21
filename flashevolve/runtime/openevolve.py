@@ -68,7 +68,7 @@ class OpenEvolveRuntime:
         if self.pool.version == 0:
             await self._seed_pool()
 
-        for _ in range(self.budget):
+        for iteration in range(1, self.budget + 1):
             version, artifact = await self.pool.select_parent(
                 strategy=self.selection_strategy
             )
@@ -76,5 +76,8 @@ class OpenEvolveRuntime:
             candidate = await self.propose.process(context)
             scored = await self.evaluate.process(candidate)
             await self.pool.admit(scored)
+            print(
+                f"[OpenEvolve iter {iteration}] evaluate score={scored.score:.3f}"
+            )
 
         return self.pool

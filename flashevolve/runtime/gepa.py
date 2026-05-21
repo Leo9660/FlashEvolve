@@ -98,6 +98,12 @@ class GEPARuntime:
             parent_score = _mean(parent_trajectory.signals.get("scores", []))
             candidate_score = _mean(candidate_trajectory.signals.get("scores", []))
             improved = candidate_score > parent_score
+            print(
+                f"[GEPA iter {iteration}] rollout parent={parent_score:.3f} "
+                f"candidate={candidate_score:.3f}; "
+                f"the score is {'improved' if improved else 'not improved'}; "
+                f"{'run evaluate' if improved else 'skip evaluate'}"
+            )
 
             history_item = {
                 "iteration": iteration,
@@ -110,8 +116,10 @@ class GEPARuntime:
                 scored = await self._evaluate_and_admit(candidate)
                 history_item["eval_score"] = scored.score
                 self.accepted_iterations += 1
+                print(f"[GEPA iter {iteration}] evaluate score={scored.score:.3f}")
             else:
                 self.rejected_iterations += 1
+                print(f"[GEPA iter {iteration}] evaluate skipped (no rollout improvement)")
 
             self.acceptance_history.append(history_item)
 
