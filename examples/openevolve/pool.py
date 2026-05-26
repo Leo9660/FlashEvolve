@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from math import ceil
 from itertools import islice
 from typing import Any
 
@@ -40,6 +41,7 @@ class OpenEvolvePromptPool(Pool[OpenEvolvePromptArtifact]):
         *,
         feature_bins: int = 10,
         num_islands: int = 4,
+        population_size: int | None = None,
         archive_size: int = 64,
         num_top_programs: int = 5,
         num_diverse_programs: int = 3,
@@ -52,6 +54,7 @@ class OpenEvolvePromptPool(Pool[OpenEvolvePromptArtifact]):
     ) -> None:
         self.feature_bins = feature_bins
         self.num_islands = num_islands
+        self.population_size = population_size
         self.archive_size = archive_size
         self.num_top_programs = num_top_programs
         self.num_diverse_programs = num_diverse_programs
@@ -142,6 +145,7 @@ class OpenEvolvePromptPool(Pool[OpenEvolvePromptArtifact]):
         self._update_feature_elite(record)
         self._update_archive()
         self._update_best(record)
+        self._trim_live_population()
 
         self._version += 1
         self._island_generations[island] += 1
@@ -186,18 +190,31 @@ class OpenEvolvePromptPool(Pool[OpenEvolvePromptArtifact]):
             )
 
         best = self.best_record
+        recent_history = self._build_recent_history(parent_record, limit=3)
         return OpenEvolveContext(
             version=version,
             parent=parent,
             island=island,
             parent_score=self._score(parent_record),
+            parent_metrics=dict(parent_record.metrics),
             top_programs=[self._summarize_record(record) for record in top_records],
             inspirations=[
                 self._summarize_record(record)
                 for record in inspiration_records[: self.num_inspirations]
             ],
             global_best=self._summarize_record(best) if best is not None else None,
+            recent_history=recent_history,
+            parent_artifacts=dict(parent_record.artifacts),
         )
+
+    def _build_recent_history(self, record: PromptRecord, limit: int) -> list[dict[str, Any]]:
+        history: list[dict[str, Any]] = []
+        current: PromptRecord | None = record
+        while current is not None and len(history) < limit:
+            history.append(self._summarize_record(current))
+            parent_id = current.parent_id
+            current = self._records.get(parent_id) if parent_id is not None else None
+        return history
 
     def _score(self, record: PromptRecord) -> float:
         return float(record.metrics.get("combined_score", record.score))
@@ -229,6 +246,25 @@ class OpenEvolvePromptPool(Pool[OpenEvolvePromptArtifact]):
             for program_id in self._archive
             if program_id in self._records
         ]
+
+    def _trim_live_population(self) -> None:
+        if self.population_size is None or self.population_size < 1:
+            return
+        per_island_limit = max(1, ceil(self.population_size / self.num_islands))
+        for island, ids in enumerate(self._islands):
+            records = self._records_from_ids(ids)
+            if len(records) <= per_island_limit:
+                continue
+            records.sort(
+                key=lambda record: (self._score(record), record.version),
+                reverse=True,
+            )
+            keep_ids = {
+                record.artifact.program_id for record in records[:per_island_limit]
+            }
+            self._islands[island] = [
+                program_id for program_id in ids if program_id in keep_ids
+            ]
 
     def _update_best(self, record: PromptRecord) -> None:
         if self._best_id is None:

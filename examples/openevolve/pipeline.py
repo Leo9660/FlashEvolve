@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import json
-import random
 import re
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
-from flashevolve.agents.base import Agent
 from flashevolve.artifacts.base import Artifact
 from flashevolve.llm import ChatRequest, LLMClient
-from flashevolve.solvers import Solver, SolverResult
-from flashevolve.stages import Candidate, Critique, ScoredCandidate, Stage, Trajectory
+from flashevolve.stages import Candidate, Critique, Stage, Trajectory
 
 from .prompts import SYSTEM_PROMPT, USER_PROMPT
 
@@ -33,102 +29,12 @@ class OpenEvolveContext:
     parent: OpenEvolvePromptArtifact
     island: int
     parent_score: float
+    parent_metrics: dict[str, Any]
     top_programs: list[dict[str, Any]]
     inspirations: list[dict[str, Any]]
     global_best: dict[str, Any] | None
-
-
-class IFBenchPromptSolver(Solver[OpenEvolvePromptArtifact]):
-    def __init__(
-        self,
-        *,
-        model: str | None = None,
-        max_tokens: int = 1024,
-        temperature: float = 0.0,
-        user_template: str = "Instruction:\n{instruction}\n\nResponse:",
-        extra: dict[str, Any] | None = None,
-    ) -> None:
-        self.model = model
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.user_template = user_template
-        self.extra = extra or {}
-
-    def render(self, artifact: OpenEvolvePromptArtifact, sample: Any) -> ChatRequest:
-        user_message = self.user_template.format(instruction=sample["prompt"])
-        return ChatRequest(
-            messages=[
-                {"role": "system", "content": artifact.text},
-                {"role": "user", "content": user_message},
-            ],
-            model=self.model,
-            extra={
-                "max_tokens": self.max_tokens,
-                "temperature": self.temperature,
-                **self.extra,
-            },
-        )
-
-    def parse(self, response, sample: Any) -> SolverResult:
-        return SolverResult(output=(response.content or "").strip(), signals={})
-
-
-class HotpotQAPromptSolver(Solver[OpenEvolvePromptArtifact]):
-    def __init__(
-        self,
-        *,
-        model: str | None = None,
-        max_tokens: int = 256,
-        temperature: float = 0.0,
-        extra: dict[str, Any] | None = None,
-    ) -> None:
-        self.model = model
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.extra = extra or {}
-
-    def render(self, artifact: OpenEvolvePromptArtifact, sample: Any) -> ChatRequest:
-        user_message = (
-            f"Context:\n{sample['context']}\n\n"
-            f"Question: {sample['question']}\n\n"
-            "Provide a clear, concise answer based only on the context."
-        )
-        return ChatRequest(
-            messages=[
-                {"role": "system", "content": artifact.text},
-                {"role": "user", "content": user_message},
-            ],
-            model=self.model,
-            extra={
-                "max_tokens": self.max_tokens,
-                "temperature": self.temperature,
-                **self.extra,
-            },
-        )
-
-    def parse(self, response, sample: Any) -> SolverResult:
-        return SolverResult(output=(response.content or "").strip(), signals={})
-
-
-def calculate_prompt_features(prompt: str) -> tuple[int, float]:
-    prompt_length = len(prompt)
-    prompt_lower = prompt.lower()
-    sophistication = 0.0
-
-    if len(prompt) >= 100:
-        sophistication += 0.1
-    if "step by step" in prompt_lower or "step-by-step" in prompt_lower:
-        sophistication += 0.25
-    if "exactly" in prompt_lower or "must" in prompt_lower:
-        sophistication += 0.15
-    if "format" in prompt_lower or "structure" in prompt_lower:
-        sophistication += 0.15
-    if "constraint" in prompt_lower or "requirements" in prompt_lower:
-        sophistication += 0.15
-    if "example" in prompt_lower:
-        sophistication += 0.2
-
-    return prompt_length, min(1.0, sophistication)
+    recent_history: list[dict[str, Any]]
+    parent_artifacts: dict[str, Any]
 
 
 def _format_programs(title: str, programs: list[dict[str, Any]]) -> str:
@@ -153,6 +59,74 @@ def _format_programs(title: str, programs: list[dict[str, Any]]) -> str:
     return "\n\n".join(lines)
 
 
+def _format_metrics(metrics: dict[str, Any]) -> str:
+    if not metrics:
+        return "- combined_score: 0.0000"
+    lines: list[str] = []
+    for name, value in metrics.items():
+        if isinstance(value, float):
+            lines.append(f"- {name}: {value:.4f}")
+        else:
+            lines.append(f"- {name}: {value}")
+    return "\n".join(lines)
+
+
+def _identify_improvement_areas(
+    parent_score: float,
+    global_best: dict[str, Any] | None,
+    parent_artifacts: dict[str, Any],
+) -> str:
+    messages: list[str] = []
+    if global_best is not None:
+        best_score = float(global_best.get("score", 0.0))
+        delta = best_score - parent_score
+        if delta > 1e-9:
+            messages.append(
+                f"Close the gap to the current global best ({delta:.3f} score difference)."
+            )
+    failed_examples = list(parent_artifacts.get("failed_examples", []))
+    if failed_examples:
+        messages.append(
+            "Address the recent failed examples and tighten instructions around missed constraints."
+        )
+    if not messages:
+        messages.append("Preserve the current strengths while improving clarity and consistency.")
+    return " ".join(messages)
+
+
+def _format_artifacts(parent_artifacts: dict[str, Any]) -> str:
+    failed_examples = list(parent_artifacts.get("failed_examples", []))
+    if not failed_examples:
+        return "Artifacts: none available."
+    lines = ["Artifacts from recent failed examples:"]
+    for idx, failure in enumerate(failed_examples[:3], start=1):
+        lines.append(
+            f"{idx}. instruction={failure.get('instruction', '')!r} | "
+            f"score={failure.get('score', 0.0):.3f} | "
+            f"feedback={failure.get('feedback', '')}"
+        )
+    return "\n".join(lines)
+
+
+def _format_evolution_history(
+    recent_history: list[dict[str, Any]],
+    top_programs: list[dict[str, Any]],
+    inspirations: list[dict[str, Any]],
+) -> str:
+    sections: list[str] = []
+    if recent_history:
+        lines = ["Recent lineage:"]
+        for idx, record in enumerate(recent_history, start=1):
+            lines.append(
+                f"{idx}. score={record.get('score', 0.0):.3f} | "
+                f"changes={record.get('changes_description') or '(initial prompt)'}"
+            )
+        sections.append("\n".join(lines))
+    sections.append(_format_programs("Top prompts", top_programs))
+    sections.append(_format_programs("Inspiration prompts", inspirations))
+    return "\n\n".join(sections)
+
+
 def make_openevolve_propose(
     *,
     llm: LLMClient,
@@ -160,6 +134,8 @@ def make_openevolve_propose(
     max_tokens: int = 1024,
     temperature: float = 0.8,
     extra: dict[str, Any] | None = None,
+    system_prompt: str = SYSTEM_PROMPT,
+    user_prompt_template: str = USER_PROMPT,
     workers: int = 1,
 ) -> Stage[OpenEvolveContext, Candidate]:
     request_extra = extra or {}
@@ -169,20 +145,26 @@ def make_openevolve_propose(
             super().__init__(workers=workers)
 
         async def process(self, item: OpenEvolveContext) -> Candidate:
-            global_best = item.global_best
-            global_best_score = 0.0 if global_best is None else global_best.get("score", 0.0)
-            user_message = USER_PROMPT.format(
-                parent_score=item.parent_score,
-                island=item.island,
-                global_best_score=global_best_score,
+            user_message = user_prompt_template.format(
+                metrics=_format_metrics(item.parent_metrics),
+                improvement_areas=_identify_improvement_areas(
+                    item.parent_score,
+                    item.global_best,
+                    item.parent_artifacts,
+                ),
+                artifacts=_format_artifacts(item.parent_artifacts),
+                evolution_history=_format_evolution_history(
+                    item.recent_history,
+                    item.top_programs,
+                    item.inspirations,
+                ),
                 current_prompt=item.parent.text,
-                top_programs=_format_programs("Top prompts", item.top_programs),
-                inspirations=_format_programs("Inspiration prompts", item.inspirations),
+                current_program=item.parent.text,
             )
             response = await llm.chat(
                 ChatRequest(
                     messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_message},
                     ],
                     model=model,
@@ -193,8 +175,9 @@ def make_openevolve_propose(
                     },
                 )
             )
-            matches = _CODEBLOCK_RE.findall(response.content)
-            body = matches[-1].strip() if matches else response.content.strip()
+            response_content = response.content or ""
+            matches = _CODEBLOCK_RE.findall(response_content)
+            body = matches[-1].strip() if matches else response_content.strip()
             body = body or item.parent.text
             change_summary = _summarize_prompt_change(item.parent.text, body)
             artifact = OpenEvolvePromptArtifact(
@@ -241,205 +224,3 @@ def _summarize_prompt_change(previous: str, current: str) -> str:
     if not added:
         return "prompt rewritten with structural edits"
     return "added emphasis on " + ", ".join(added[:6])
-
-
-class OpenEvolveDatasetEvaluate(Stage[Candidate, ScoredCandidate]):
-    def __init__(
-        self,
-        *,
-        agent: Agent,
-        dataset: list[dict[str, Any]],
-        metric: Callable[[Any, Any], float],
-        feedback_fn: Callable[[Any, Any, float], str],
-        llm: LLMClient,
-        stage1_samples: int = 10,
-        stage2_samples: int = 40,
-        cascade_threshold: float = 0.9,
-        seed: int = 42,
-        workers: int = 1,
-    ) -> None:
-        super().__init__(workers=workers)
-        self.agent = agent
-        self.dataset = list(dataset)
-        self.metric = metric
-        self.feedback_fn = feedback_fn
-        self.llm = llm
-        self.stage1_samples = stage1_samples
-        self.stage2_samples = stage2_samples
-        self.cascade_threshold = cascade_threshold
-        self.rng = random.Random(seed)
-
-    async def process(self, item: Candidate) -> ScoredCandidate:
-        stage1 = await self._evaluate_batch(item.artifact, self._sample_batch(self.stage1_samples))
-        final = stage1
-        print(
-            f"[OpenEvolve eval] stage1 score={stage1['score']:.3f} "
-            f"(n={len(stage1['per_sample_scores'])})"
-        )
-        if stage1["score"] >= self.cascade_threshold:
-            final = await self._evaluate_batch(
-                item.artifact, self._sample_batch(self.stage2_samples)
-            )
-            print(
-                f"[OpenEvolve eval] stage2 score={final['score']:.3f} "
-                f"(n={len(final['per_sample_scores'])})"
-            )
-        else:
-            print(
-                f"[OpenEvolve eval] stage2 skipped "
-                f"(threshold={self.cascade_threshold:.3f})"
-            )
-
-        score = final["score"]
-        per_sample_scores = final["per_sample_scores"]
-        feedback = final["feedback"]
-        outputs = final["outputs"]
-        prompt_length, reasoning_strategy = calculate_prompt_features(item.artifact.text)
-        metrics = {
-            "combined_score": score,
-            "prompt_length": float(prompt_length),
-            "reasoning_strategy": reasoning_strategy,
-        }
-        return ScoredCandidate(
-            candidate=item,
-            score=score,
-            signals={
-                "metrics": metrics,
-                "per_sample_scores": per_sample_scores,
-                "num_samples": len(per_sample_scores),
-                "outputs": outputs,
-                "feedback": feedback,
-                "agent_signals": final["agent_signals"],
-                "artifacts": final["artifacts"],
-            },
-        )
-
-    def _sample_batch(self, k: int) -> list[dict[str, Any]]:
-        if not self.dataset:
-            return []
-        return self.rng.sample(self.dataset, min(k, len(self.dataset)))
-
-    async def _evaluate_batch(
-        self,
-        artifact: OpenEvolvePromptArtifact,
-        samples: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        results = await self.agent.run(artifact, samples, llm=self.llm)
-        outputs = [result.output for result in results]
-        per_sample_scores = [self.metric(sample, output) for sample, output in zip(samples, outputs)]
-        feedback = [
-            self.feedback_fn(sample, output, score)
-            for sample, output, score in zip(samples, outputs, per_sample_scores)
-        ]
-        failed_examples = [
-            {
-                "instruction": sample["prompt"],
-                "output": output,
-                "score": sample_score,
-                "feedback": diag,
-            }
-            for sample, output, sample_score, diag in zip(
-                samples, outputs, per_sample_scores, feedback
-            )
-            if sample_score < 1.0
-        ]
-        return {
-            "score": sum(per_sample_scores) / len(per_sample_scores) if per_sample_scores else 0.0,
-            "per_sample_scores": per_sample_scores,
-            "feedback": feedback,
-            "outputs": outputs,
-            "agent_signals": [result.signals for result in results],
-            "artifacts": {"failed_examples": failed_examples[:3]},
-        }
-
-
-class OpenEvolveIFBenchEvaluate(OpenEvolveDatasetEvaluate):
-    pass
-
-
-async def evaluate_dataset(
-    *,
-    agent: Agent,
-    artifact: OpenEvolvePromptArtifact,
-    dataset: list[dict[str, Any]],
-    metric: Callable[[Any, Any], float],
-    feedback_fn: Callable[[Any, Any, float], str],
-    llm: LLMClient,
-    batch_size: int = 20,
-) -> dict[str, Any]:
-    all_scores: list[float] = []
-    failed_examples: list[dict[str, Any]] = []
-    for offset in range(0, len(dataset), batch_size):
-        batch = dataset[offset : offset + batch_size]
-        results = await agent.run(artifact, batch, llm=llm)
-        for sample, result in zip(batch, results):
-            output = result.output
-            score = metric(sample, output)
-            all_scores.append(score)
-            if score < 1.0:
-                failed_examples.append(
-                    {
-                        "instruction": sample["prompt"],
-                        "output": output,
-                        "score": score,
-                        "feedback": feedback_fn(sample, output, score),
-                    }
-                )
-    accuracy = sum(all_scores) / len(all_scores) if all_scores else 0.0
-    return {
-        "combined_score": accuracy,
-        "num_samples": len(dataset),
-        "num_failures": len(failed_examples),
-        "failed_examples": failed_examples[:10],
-    }
-
-
-def ifbench_metric(sample: dict[str, Any], output: str) -> float:
-    import dspy
-    from gepa_artifact.benchmarks.IFBench.ifbench_metric import metric_with_feedback
-
-    return float(
-        metric_with_feedback(
-            dspy.Example(**sample),
-            dspy.Prediction(response=output),
-        ).score
-    )
-
-
-def ifbench_feedback(sample: dict[str, Any], output: str, score: float) -> str:
-    import dspy
-    from gepa_artifact.benchmarks.IFBench.ifbench_metric import metric_with_feedback
-
-    return metric_with_feedback(
-        dspy.Example(**sample),
-        dspy.Prediction(response=output),
-    ).feedback
-
-
-def normalize_hotpot_answer(text: str) -> str:
-    normalized = text.strip().lower()
-    normalized = re.sub(r"[\"'`]", "", normalized)
-    normalized = re.sub(r"\s+", " ", normalized)
-    normalized = re.sub(r"[.,!?;:]+$", "", normalized)
-    normalized = re.sub(r"\b(a|an|the)\b", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized)
-    return normalized.strip()
-
-
-def hotpotqa_metric(sample: dict[str, Any], output: str) -> float:
-    prediction = normalize_hotpot_answer(output)
-    expected = normalize_hotpot_answer(str(sample["answer"]))
-    if prediction == expected:
-        return 1.0
-    if expected and expected in prediction:
-        return 1.0
-    return 0.0
-
-
-def hotpotqa_feedback(sample: dict[str, Any], output: str, score: float) -> str:
-    if score >= 1.0:
-        return "Answer matches the expected HotpotQA answer."
-    return (
-        f"Expected answer {sample['answer']!r}, but the model responded with {output!r}. "
-        "The answer should be concise and grounded in the provided context."
-    )
