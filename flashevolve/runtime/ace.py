@@ -8,6 +8,10 @@ from ..stages.propose import Propose
 from ..stages.rollout import Rollout
 
 
+def _mean(scores: list[float]) -> float:
+    return sum(scores) / len(scores) if scores else 0.0
+
+
 class ACERuntime:
     """ACE-specific synchronous runtime.
 
@@ -84,6 +88,9 @@ class ACERuntime:
                 "num_samples": scored.signals.get("num_samples", 0),
             }
         )
+        print(
+            f"[ACE iter {iteration}] evaluate ({reason}) score={scored.score:.3f}"
+        )
 
     async def run(self) -> Pool:
         if self.pool.version == 0:
@@ -100,6 +107,8 @@ class ACERuntime:
 
             sampled = Sampled(version=version, artifact=artifact, samples=samples)
             trajectory = await self.rollout.process(sampled)
+            rollout_score = _mean(trajectory.signals.get("scores", []))
+            print(f"[ACE iter {iteration}] rollout score={rollout_score:.3f}")
             critique = await self.reflect.process(trajectory)
             candidate = await self.propose.process(critique)
             await self.pool.admit(candidate)
