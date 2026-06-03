@@ -98,23 +98,3 @@ See `examples/gepa/datasets.py` for the **dataset convention** (no
 `Dataset` class — a dataset is `list[Any]`, schema by the user) and a
 real-task loader (`load_ifbench`).
 
-## Paper
-
-The asynchronous runtime that motivates this framework is described in:
-
-> **FlashEvolve: Accelerating Agent Self-Evolution with Asynchronous Stage Orchestration**
-> Zhengding Hu, Mingge Lu, Zhen Wang, Jixuan Ruan, Chang Chen, Zaifeng Pan,
-> Yue Guan, Ruiyi Wang, Zhongkai Yu, Chao Zhang, Yufei Ding. 2026.
-> [arXiv:2605.08520](https://arxiv.org/abs/2605.08520)
-
-```bibtex
-@misc{hu2026flashevolveacceleratingagentselfevolution,
-      title={FlashEvolve: Accelerating Agent Self-Evolution with Asynchronous Stage Orchestration},
-      author={Zhengding Hu and Mingge Lu and Zhen Wang and Jixuan Ruan and Chang Chen and Zaifeng Pan and Yue Guan and Ruiyi Wang and Zhongkai Yu and Chao Zhang and Yufei Ding},
-      year={2026},
-      eprint={2605.08520},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2605.08520},
-}
-```
