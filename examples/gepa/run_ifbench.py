@@ -9,7 +9,7 @@ of ``IFBenchAgent.run`` (two chat calls instead of one).
 Prereqs:
     1. vLLM @ :8000  (see ``run.py`` docstring for launch command)
     2. Upstream GEPA artifact checked out at
-       ``/workspace/flash-evolve/gepa-artifact/`` so we can import the
+       ``/workspace/FlashEvolve/gepa-artifact/`` so we can import the
        IFBench metric (reused verbatim, no reimplementation).
 
 Run:
@@ -23,7 +23,7 @@ import os
 import sys
 
 # IFBench metric lives in the upstream GEPA artifact - make it importable.
-sys.path.insert(0, "/workspace/flash-evolve/gepa-artifact")
+sys.path.insert(0, "/workspace/FlashEvolve/gepa-artifact")
 
 import dspy  # noqa: E402
 from gepa_artifact.benchmarks.IFBench.ifbench_metric import metric_with_feedback  # noqa: E402
@@ -32,8 +32,9 @@ from flashevolve.agents import Agent, AgentResult  # noqa: E402
 from flashevolve.artifacts import PromptArtifact  # noqa: E402
 from flashevolve.llm import ChatRequest, OpenAIChatClient  # noqa: E402
 from flashevolve.pools import AppendOnlyPool  # noqa: E402
-from flashevolve.runtime import GEPARuntime  # noqa: E402
+from flashevolve.runtime import AsyncGEPARuntime, GEPARuntime  # noqa: E402
 from flashevolve.samplers import FullSampler, RandomSampler  # noqa: E402
+from flashevolve.stages import ReflectivePatch  # noqa: E402
 
 from examples.gepa import (  # noqa: E402
     GEPAReflect,
@@ -134,8 +135,22 @@ def parse_args() -> argparse.Namespace:
         "--budget",
         type=int,
         default=BUDGET,
-        help="Number of GEPA evolution iterations.",
+        help="Number of GEPA evolution iterations (proposal cap).",
     )
+    # Async pipeline options (GEPARuntime -> AsyncGEPARuntime).
+    parser.add_argument("--runtime", choices=("sync", "async"), default="sync")
+    parser.add_argument(
+        "--staleness", choices=("none", "hard", "reflective", "meta"), default="none",
+        help="async only: how to handle proposals stale at admission.",
+    )
+    parser.add_argument("--pipeline-depth", type=int, default=16,
+                        help="async only: K proposals in flight.")
+    parser.add_argument("--workers", type=int, default=8,
+                        help="async only: per-stage + eval-worker parallelism.")
+    parser.add_argument("--max-evals", type=int, default=0,
+                        help="async only: stop after N metric evals (0 = use --budget).")
+    parser.add_argument("--meta-stale-n", type=int, default=4)
+    parser.add_argument("--meta-mode", choices=("serial", "parallel"), default="serial")
     return parser.parse_args()
 
 
@@ -187,22 +202,34 @@ async def main() -> None:
     val = val_full if VAL_SUBSAMPLE is None else val_full[:VAL_SUBSAMPLE]
     print(f"Loaded train={len(train)} val={len(val)} (full={len(val_full)})")
 
+    # Async parallelises stages + full-vals; SyncRuntime ignores stage.workers.
+    W = args.workers if args.runtime == "async" else 1
+
+    class _CountingMetric:
+        """Counts every metric eval so async can stop at --max-evals."""
+
+        def __init__(self, metric):
+            self._metric = metric
+            self.n = 0
+
+        def __call__(self, sample, output):
+            self.n += 1
+            return self._metric(sample, output)
+
+    metric = _CountingMetric(ifbench_metric)
     rollout = make_gepa_rollout(
-        agent=agent, metric=ifbench_metric, feedback_fn=ifbench_feedback, llm=client
+        agent=agent, metric=metric, feedback_fn=ifbench_feedback, llm=client, workers=W
     )
-    reflect = GEPAReflect()
+    reflect = GEPAReflect(workers=W)
     propose = make_gepa_propose(
-        llm=client,
-        max_tokens=1024,
-        temperature=0.7,
-        extra=propose_extra,
+        llm=client, max_tokens=1024, temperature=0.7, extra=propose_extra, workers=W
     )
     evaluate = make_gepa_evaluate(
-        agent=agent, metric=ifbench_metric, llm=client, sampler=FullSampler(val)
+        agent=agent, metric=metric, llm=client, sampler=FullSampler(val), workers=W
     )
 
     pool = AppendOnlyPool(seed=SEED)
-    runtime = GEPARuntime(
+    common = dict(
         pool=pool,
         sampler=RandomSampler(train, k=MINIBATCH, seed=SEED),
         rollout=rollout,
@@ -213,17 +240,42 @@ async def main() -> None:
         budget=args.budget,
         selection_strategy="pareto_front",
     )
-
-    print(
-        f"Running GEPA for {args.budget} iters "
-        f"(1 bootstrap eval + accept-on-improvement evolution)"
-    )
+    if args.runtime == "sync":
+        runtime = GEPARuntime(**common)
+        print(f"Running SYNC GEPA for {args.budget} iters")
+    else:
+        repair = (
+            ReflectivePatch(llm=client, model=model, workers=W)
+            if args.staleness in ("reflective", "meta") else None
+        )
+        runtime = AsyncGEPARuntime(
+            **common,
+            pipeline_depth=args.pipeline_depth,
+            staleness_mode=args.staleness,
+            repair=repair,
+            eval_workers=W,
+            meta_stale_n=args.meta_stale_n,
+            meta_mode=args.meta_mode,
+            max_evals=(args.max_evals or None),
+            eval_count=lambda: metric.n,
+        )
+        print(
+            f"Running ASYNC GEPA (K={args.pipeline_depth}, staleness={args.staleness}, "
+            f"workers={W}, max_evals={args.max_evals})"
+        )
     await runtime.run()
 
-    print(
-        f"Accepted={runtime.accepted_iterations} "
-        f"Rejected={runtime.rejected_iterations}"
-    )
+    if args.runtime == "async":
+        print(
+            f"[async stats] stale_seen={runtime.stale_seen} gated_out={runtime.gated_out} "
+            f"discarded={runtime.stale_discarded} repaired={runtime.stale_repaired} "
+            f"meta_synth={runtime.meta_syntheses}"
+        )
+    else:
+        print(
+            f"Accepted={runtime.accepted_iterations} "
+            f"Rejected={runtime.rejected_iterations}"
+        )
 
     print(f"\n=== Final pool (version={pool.version}) ===")
     for i, sc in enumerate(pool._scores):
