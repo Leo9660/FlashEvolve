@@ -296,7 +296,7 @@ async def main() -> None:
     print(f"\n=== Final pool (version={pool.version}) ===")
     for i, sc in enumerate(pool._scores):
         label = "bootstrap" if i == 0 else f"iter {i}"
-        head = pool._artifacts[i].text.splitlines()[0][:80]
+        head = (pool._artifacts[i].text.splitlines() or [""])[0][:80]
         print(f"  v{i + 1} [{label}]  score={sc:.3f}  artifact[0]: {head!r}")
 
     best = max(range(len(pool._scores)), key=lambda i: pool._scores[i])
