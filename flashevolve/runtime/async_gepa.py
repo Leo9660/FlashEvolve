@@ -150,10 +150,12 @@ class AsyncGEPARuntime:
         await q_sampled.close()
 
     # ── candidate-rollout gate (GEPA's minibatch gate) ───────────────────
-    async def _gate(self, q_cand: FIFOQueue, q_gated: FIFOQueue) -> None:
-        """Roll out each candidate on its parent's minibatch and keep it only if
-        it beats the parent (candidate_score > parent_score) — GEPARuntime's gate,
-        run by ``rollout.workers`` in parallel here."""
+    async def _gate(self, q_cand: FIFOQueue, q_scored: FIFOQueue) -> None:
+        """Roll out each candidate on its parent's minibatch and ATTACH its score
+        as ``(candidate, candidate_score)``. The gate DECISION is applied in
+        ``_tail`` AFTER staleness routing (matching async_gepa.py, where staleness
+        handling precedes the score gate), so stale proposals are buffered (meta)
+        or repaired (reflective) regardless of whether they beat the parent."""
         async def one() -> None:
             while True:
                 try:
@@ -161,17 +163,13 @@ class AsyncGEPARuntime:
                 except QueueClosed:
                     return
                 traj = cand.critique.trajectory
-                parent_score = _mean(traj.signals.get("scores", []))
                 cand_traj = await self.rollout.process(
                     Sampled(version=cand.parent_version, artifact=cand.artifact, samples=traj.samples)
                 )
                 cand_score = _mean(cand_traj.signals.get("scores", []))
-                if cand_score > parent_score:
-                    await q_gated.put(cand)
-                else:
-                    self.gated_out += 1
+                await q_scored.put((cand, cand_score))
         await asyncio.gather(*(one() for _ in range(self.rollout.workers)))
-        await q_gated.close()
+        await q_scored.close()
 
     # ── admit helpers ────────────────────────────────────────────────────
     async def _admit(self, candidate: Candidate) -> bool:
@@ -192,12 +190,12 @@ class AsyncGEPARuntime:
             )
         return improved
 
-    # ── tail: route gate-passers by staleness ────────────────────────────
-    async def _tail(self, q_gated: FIFOQueue, q_stale: FIFOQueue,
+    # ── tail: staleness routing FIRST, then the score gate ───────────────
+    async def _tail(self, q_scored: FIFOQueue, q_stale: FIFOQueue,
                     q_meta: FIFOQueue, q_eval: FIFOQueue) -> None:
         while True:
             try:
-                cand = await q_gated.get()
+                cand, cand_score = await q_scored.get()
             except QueueClosed:
                 if self.staleness_mode == "meta" and self._meta_buffer:
                     await q_meta.put(self._meta_buffer)
@@ -218,7 +216,13 @@ class AsyncGEPARuntime:
                     self._meta_buffer.append(cand)
                     self.meta_buffer_max = max(self.meta_buffer_max, len(self._meta_buffer))
                     continue
-                # none: admit as-is
+                # none: fall through to the gate
+            # GEPA minibatch gate, applied AFTER staleness (async_gepa.py order):
+            # only full-validate a fresh proposal that beats its parent.
+            parent_score = _mean(cand.critique.trajectory.signals.get("scores", []))
+            if cand_score <= parent_score:
+                self.gated_out += 1
+                continue
             await q_eval.put(cand)
 
     async def _eval_worker(self, q_eval: FIFOQueue, q_meta: FIFOQueue) -> None:
