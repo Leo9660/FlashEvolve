@@ -73,10 +73,12 @@ class IFBenchAgent(Agent):
     """
 
     def __init__(
-        self, llm: OpenAIChatClient, *, request_extra: dict | None = None
+        self, llm: OpenAIChatClient, *, request_extra: dict | None = None,
+        temperature: float = 0.0,
     ) -> None:
         self.llm = llm
         self.request_extra = request_extra or {}
+        self.temperature = temperature
 
     async def run(self, artifact, samples, *, llm):
         client = llm or self.llm
@@ -90,7 +92,7 @@ class IFBenchAgent(Agent):
                     ],
                     extra={
                         "max_tokens": 1024,
-                        "temperature": 0.0,
+                        "temperature": self.temperature,
                         **self.request_extra,
                     },
                 )
@@ -151,6 +153,12 @@ def parse_args() -> argparse.Namespace:
                         help="async only: stop after N metric evals (0 = use --budget).")
     parser.add_argument("--meta-stale-n", type=int, default=4)
     parser.add_argument("--meta-mode", choices=("serial", "parallel"), default="serial")
+    parser.add_argument("--base-url", default=VLLM_BASE_URL, help="vLLM base url override.")
+    parser.add_argument("--val-size", type=int, default=0,
+                        help="random val subsample size (0 = full val).")
+    parser.add_argument("--val-seed", type=int, default=2026)
+    parser.add_argument("--temp", type=float, default=0.0, help="agent temperature.")
+    parser.add_argument("--data-dir", default=DATA_DIR)
     return parser.parse_args()
 
 
@@ -176,11 +184,11 @@ def build_client_and_agent(
 
     model = args.model or VLLM_MODEL
     client = OpenAIChatClient(
-        base_url=VLLM_BASE_URL,
+        base_url=args.base_url,
         model=model,
         timeout=180.0,
     )
-    agent = IFBenchAgent(client, request_extra=NO_THINK_EXTRA)
+    agent = IFBenchAgent(client, request_extra=NO_THINK_EXTRA, temperature=args.temp)
     return client, agent, model, NO_THINK_EXTRA
 
 
@@ -197,9 +205,14 @@ async def main() -> None:
     )
     print(f"  {args.provider} responded: {pong.content!r}")
 
-    train = load_ifbench(DATA_DIR, "train")
-    val_full = load_ifbench(DATA_DIR, "val")
-    val = val_full if VAL_SUBSAMPLE is None else val_full[:VAL_SUBSAMPLE]
+    train = load_ifbench(args.data_dir, "train")
+    val_full = load_ifbench(args.data_dir, "val")
+    if args.val_size and args.val_size < len(val_full):
+        import random as _rng
+        _rng.seed(args.val_seed)
+        val = _rng.sample(val_full, args.val_size)
+    else:
+        val = val_full
     print(f"Loaded train={len(train)} val={len(val)} (full={len(val_full)})")
 
     # Async parallelises stages + full-vals; SyncRuntime ignores stage.workers.
@@ -229,6 +242,9 @@ async def main() -> None:
     )
 
     pool = AppendOnlyPool(seed=SEED)
+    # With an async eval budget (--max-evals), the proposal count is only a
+    # large safety cap; otherwise --budget bounds the run.
+    eff_budget = 10_000_000 if (args.runtime == "async" and args.max_evals) else args.budget
     common = dict(
         pool=pool,
         sampler=RandomSampler(train, k=MINIBATCH, seed=SEED),
@@ -237,7 +253,7 @@ async def main() -> None:
         propose=propose,
         evaluate=evaluate,
         initial_artifact=PromptArtifact(text=INITIAL_PROMPT),
-        budget=args.budget,
+        budget=eff_budget,
         selection_strategy="pareto_front",
     )
     if args.runtime == "sync":
