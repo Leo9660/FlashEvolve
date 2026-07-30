@@ -278,15 +278,29 @@ class AsyncGEPARuntime:
                     parent_version=cur_v, parent_artifact=cur_a,
                     artifact=evolving, critique=snapshot[-1].critique,
                 )
-                await self._admit(final)
+                improved = await self._admit(final)
                 self.meta_syntheses += 1
+                await self._meta_redrain(q_meta, improved)
             else:
                 for batch in batches:
                     rep = await self.repair.process(  # type: ignore[union-attr]
                         StaleBatch(current_version=cur_v, current_artifact=cur_a, stale=batch)
                     )
-                    await self._admit(rep)
+                    improved = await self._admit(rep)
                     self.meta_syntheses += 1
+                    await self._meta_redrain(q_meta, improved)
+
+    async def _meta_redrain(self, q_meta: FIFOQueue, improved: bool) -> None:
+        """A meta-proposal that advances the frontier re-drains the buffer, like
+        the monolith's drain-on-any-accept. Guarded against the closing queue."""
+        if not (improved and self._meta_buffer):
+            return
+        snapshot = self._meta_buffer
+        self._meta_buffer = []
+        try:
+            await q_meta.put(snapshot)
+        except (QueueClosed, RuntimeError):
+            self._meta_buffer = snapshot
 
     # ── run ──────────────────────────────────────────────────────────────
     async def run(self) -> Pool:
